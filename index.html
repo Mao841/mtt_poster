@@ -1,0 +1,256 @@
+<!doctype html>
+<html lang="zh">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="robots" content="noindex,nofollow,noarchive">
+<title>奶茶店海报</title>
+<style>
+  html,body{margin:0;width:100%;height:100%;background:#000;overflow:hidden}
+
+  /* 长条容器：用 transform 做 GPU 合成，电视上比改 scrollTop 顺滑得多 */
+  #strip{
+    display:flex;
+    flex-direction:column;
+    width:100%;
+    will-change:transform;
+    transform:translate3d(0,0,0);
+    backface-visibility:hidden;
+  }
+
+  /* 每张图统一按屏幕宽度缩放，高度 = 宽度 / 自身宽高比 */
+  #strip img{
+    display:block;
+    width:100%;
+    height:auto;
+    flex:none;
+    user-select:none;
+    -webkit-user-drag:none;
+  }
+
+  /* 兜底提示：清单为空或图片全部加载失败时才出现 */
+  #msg{
+    position:fixed;inset:0;
+    display:none;
+    color:#fff;
+    font:24px/1.8 sans-serif;
+    padding:40px;
+    background:#000;
+    white-space:pre-line;
+  }
+
+  /* 离线状态角标：断网时显示，确认「没网也在放」，也提醒店员该查网络了 */
+  .badge{
+    position:fixed;top:10px;right:12px;z-index:9;
+    display:none;align-items:center;gap:7px;
+    background:rgba(0,0,0,.72);color:#fff;
+    font:14px/1 sans-serif;padding:7px 12px;border-radius:9px;
+    opacity:.85;pointer-events:none;
+  }
+  .badge.on{display:flex}
+  .badge i{width:8px;height:8px;border-radius:50%;background:#ff4d4d;font-style:normal;flex:none}
+</style>
+</head>
+<body>
+<div id="strip"></div>
+<div id="msg"></div>
+<div class="badge" id="net"><i></i><span id="netText">离线</span></div>
+
+<script>
+(function () {
+  'use strict';
+
+  // ── 可调项 ──────────────────────────────────────────────────────────────
+  var CONFIG = {
+    manifestUrl: 'posters.json',
+    defaultFiles: ['1.jpg', '2.jpg', '3.jpg', '4.jpg', '5.jpg'], // 本地直接打开或清单读取失败时的默认图片列表
+    speedPxPerSec: 54,   // 滚动速度（单位 像素/秒）。当前 = 36 的 1.5 倍。越大越快。
+    useSetHeight: false, // true = 强制每张图满屏高（最多裁 15%）；false = 按宽度缩放拼长条
+    maxImageHeightVh: 320, // 单张图最高不超过多少个屏幕高度，防止超大图把节奏拖垮
+    defaultDurationMs: 45000 // 清单还没读到时的临时时长
+  };
+  // ────────────────────────────────────────────────────────────────────────
+
+  var test = document.createElement('div');
+  test.style.cssText = 'position:fixed;left:-9999px;top:0;width:100px;height:100px';
+  document.body.appendChild(test);
+  var viewportW = test.offsetWidth || window.innerWidth || 1920;
+  test.parentNode.removeChild(test);
+
+  var strip = document.getElementById('strip');
+  var msgEl = document.getElementById('msg');
+
+  var setH = 0;          // 一组图片的总高度（像素）
+  var durationMs = CONFIG.defaultDurationMs;
+  var progress = 0;      // 0..1，1 表示刚好滚完一组
+  var lastTs = 0;
+  var ready = false;
+  var paused = false;
+
+  function showMsg(text) { msgEl.textContent = text; msgEl.style.display = 'block'; }
+
+  function measureSetHeight() {
+    var total = 0;
+    var kids = strip.children;
+    var half = kids.length >> 1;   // 长条是两份相同内容，只量第一份
+    for (var i = 0; i < half; i++) total += kids[i].getBoundingClientRect().height;
+    return total;
+  }
+
+  // 一组的长条有多长，就以它为准换算「一组滚完需要多久」，
+  // 这样图片数量变动时速度仍然恒定（每张图的停留时间按各自高度自动分配）。
+  function updateMetrics() {
+    var h = measureSetHeight();
+    if (h > 0 && Math.abs(h - setH) > 1) setH = h;
+    if (setH > 0) {
+      // 时长 = 一组的高度 / 速度。想改快慢就只改 CONFIG.speedPxPerSec。
+      durationMs = (setH / CONFIG.speedPxPerSec) * 1000;
+    }
+  }
+
+  function render() {
+    if (!ready || setH <= 0) return;
+    var p = progress % 1;
+    if (p < 0) p += 1;
+    // 两份内容完全相同：位移到「一组高度」时，画面与位移 0 时像素级一致
+    // → 取模回绕时不会看到任何跳变，实现无缝循环。
+    strip.style.transform = 'translate3d(0,' + (-p * setH).toFixed(2) + 'px,0)';
+  }
+
+  function tick(ts) {
+    if (!lastTs) lastTs = ts;
+    var dt = ts - lastTs;
+    lastTs = ts;
+
+    // 切到后台时 dt 会很大，截断避免回来后瞬间跳过好几张
+    if (dt > 0 && dt < 1000 && !paused && document.visibilityState !== 'hidden') {
+      progress += dt / durationMs;
+      render();
+    }
+    requestAnimationFrame(tick);
+  }
+
+  function buildItem(src) {
+    var img = document.createElement('img');
+    img.alt = '奶茶店海报';
+    img.decoding = 'async';
+    img.draggable = false;
+    function onImageLoaded() {
+      // 先按原始宽高比把布局撑起来，避免各图高度不定导致的长短不一
+      if (img.naturalWidth > 0 && CONFIG.useSetHeight) {
+        var h = Math.min(img.naturalHeight / img.naturalWidth * viewportW, viewportW * CONFIG.maxImageHeightVh / 100);
+        img.style.width = (h * img.naturalWidth / img.naturalHeight) + 'px';
+        img.style.height = h + 'px';
+        img.style.flex = 'none';
+      } else if (img.naturalWidth > 0) {
+        img.style.aspectRatio = img.naturalWidth + ' / ' + img.naturalHeight;
+      }
+      scheduleUpdate();
+    }
+    img.addEventListener('load', onImageLoaded);
+    img.addEventListener('error', function () {
+      console.warn('图片加载失败:', src);
+      img.style.display = 'none';
+      scheduleUpdate();
+    });
+    img.src = src;
+    if (img.complete && img.naturalWidth > 0) {
+      onImageLoaded();
+    }
+    return img;
+  }
+
+  var updateTimer = 0;
+  function scheduleUpdate() {
+    // 图片陆续加载完成会反复触发，合并成一次重排，避免抖动
+    clearTimeout(updateTimer);
+    updateTimer = setTimeout(updateMetrics, 120);
+  }
+
+  function renderList(files) {
+    if (!files.length) {
+      showMsg('未找到海报文件。\n请把图片放进部署目录，并在 posters.json 里列出来。');
+      return;
+    }
+
+    var frag = document.createDocumentFragment();
+    for (var i = 0; i < files.length; i++) frag.appendChild(buildItem(files[i]));
+    strip.appendChild(frag);
+    // 再复制一份接在后面，构成一个可以无限循环的闭环
+    for (var j = 0; j < files.length; j++) frag.appendChild(buildItem(files[j]));
+    strip.appendChild(frag);
+
+    ready = true;
+    // 立刻排一次，让长条高度尽早稳定
+    setTimeout(updateMetrics, 200);
+    window.addEventListener('load', updateMetrics);
+    requestAnimationFrame(tick);
+  }
+
+  // ── 离线支持 ────────────────────────────────────────────────────────────
+  // 注册 Service Worker：首次成功加载后会把页面和所有图片缓存到本地，
+  // 之后即使断网（甚至断电重启再打开浏览器）也能继续滚动。
+  // 注意：本地 file:// 协议不运行 Service Worker
+  if ('serviceWorker' in navigator && location.protocol !== 'file:') {
+    window.addEventListener('load', function () {
+      navigator.serviceWorker.register('sw.js').catch(function (e) {
+        console.warn('[sw] 注册失败，页面仍可正常运行', e);
+      });
+    });
+  }
+
+  // 离线角标：确认「没网也在放」，同时提醒店员该查网络了（本地 file:// 预览时不显示）
+  (function () {
+    var badge = document.getElementById('net');
+    var text = document.getElementById('netText');
+    function sync() {
+      if (location.protocol === 'file:') {
+        badge.classList.remove('on');
+        return;
+      }
+      var off = !navigator.onLine;
+      badge.classList.toggle('on', off);
+      text.textContent = off ? '离线运行中' : '在线';
+    }
+    window.addEventListener('online', sync);
+    window.addEventListener('offline', sync);
+    sync();
+  })();
+
+  function startWithFiles(files) {
+    var list = (files || []).filter(function (f) { return typeof f === 'string' && f; });
+    if (!list.length) list = CONFIG.defaultFiles;
+    renderList(list);
+  }
+
+  // 本地直接双击 (file:// 协议) 时，浏览器因安全策略限制无法 fetch 本地文件，直接采用内置清单
+  if (location.protocol === 'file:') {
+    startWithFiles(CONFIG.defaultFiles);
+  } else {
+    fetch(CONFIG.manifestUrl, { cache: 'no-store' })
+      .then(function (r) {
+        if (!r.ok) throw new Error('manifest ' + r.status);
+        return r.json();
+      })
+      .then(function (data) {
+        var files = [];
+        if (Array.isArray(data)) files = data;
+        else if (data && Array.isArray(data.files)) files = data.files;
+        startWithFiles(files);
+      })
+      .catch(function () {
+        // 清单彻底拿不到时退回默认清单
+        startWithFiles(CONFIG.defaultFiles);
+      });
+  }
+
+  window.addEventListener('resize', function () {
+    viewportW = window.innerWidth || viewportW;
+    updateMetrics();
+    render();
+  });
+  document.addEventListener('visibilitychange', function () { lastTs = 0; });
+})();
+</script>
+</body>
+</html>
