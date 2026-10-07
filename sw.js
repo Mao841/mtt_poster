@@ -12,7 +12,7 @@
 //
 // ⚠️ 改了同名图片（比如覆盖 2.jpg）后如果没生效，把下面的 CACHE_VERSION 改个数字再部署。
 
-const CACHE_VERSION = 'v5';
+const CACHE_VERSION = 'v6';
 const CACHE_NAME = 'milk-tea-poster-' + CACHE_VERSION;
 
 // 首次安装时必须拿到的核心文件；任何一个失败就整体重试
